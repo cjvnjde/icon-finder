@@ -36,74 +36,40 @@ function calculateSimilarity(features1, features2) {
 export function generateTriplets(features, numTriplets, options = {}) {
     return tf.tidy(() => {
         const inputShape = getInputShape();
-        const {
-            useSimilaritySearch = true,
-            numCandidates = 10,
-            hardNegativeMining = true
-        } = options;
-
-        console.log(`Generating ${numTriplets} triplets with improved selection...`);
+        const {hardNegativeMining = true, isValidation = false} = options;
 
         const anchorData = [];
         const positiveData = [];
         const negativeData = [];
 
-        // Pre-compute a similarity matrix for a subset of icons if using similarity search
-        let similarityCache = new Map();
-        if (useSimilaritySearch && features.length < 1000) {
-            console.log("Pre-computing similarities for better positive selection...");
-            for (let i = 0; i < Math.min(features.length, 100); i++) {
-                const similarities = [];
-                for (let j = 0; j < features.length; j++) {
-                    if (i !== j) {
-                        similarities.push({
-                            index: j,
-                            similarity: calculateSimilarity(features[i], features[j])
-                        });
-                    }
-                }
-                similarities.sort((a, b) => b.similarity - a.similarity);
-                similarityCache.set(i, similarities);
-            }
-        }
-
         for (let i = 0; i < numTriplets; i++) {
-            // Select anchor randomly
             const anchorIdx = Math.floor(Math.random() * features.length);
 
-            let positiveIdx, negativeIdx;
+            // --- IMPROVEMENT: A positive is ALWAYS an augmentation of the anchor. ---
+            const positiveIdx = anchorIdx;
 
-            if (useSimilaritySearch && similarityCache.has(anchorIdx)) {
-                // Use pre-computed similarities
-                const similarities = similarityCache.get(anchorIdx);
+            let negativeIdx;
 
-                // Select positive from top similar icons (not identical)
-                const topK = Math.min(5, similarities.length);
-                positiveIdx = similarities[Math.floor(Math.random() * topK)].index;
-
-                // Select negative with hard negative mining
-                if (hardNegativeMining) {
-                    // Select from middle range - not too similar, not too different
-                    const midStart = Math.floor(similarities.length * 0.3);
-                    const midEnd = Math.floor(similarities.length * 0.7);
-                    const midIdx = midStart + Math.floor(Math.random() * (midEnd - midStart));
-                    negativeIdx = similarities[midIdx].index;
-                } else {
-                    // Select from bottom similar icons
-                    const bottomK = Math.min(10, similarities.length);
-                    negativeIdx = similarities[similarities.length - 1 - Math.floor(Math.random() * bottomK)].index;
+            // Find a hard negative: one that is visually similar to the anchor but not the same.
+            if (hardNegativeMining) {
+                const similarities = [];
+                for (let j = 0; j < features.length; j++) {
+                    if (anchorIdx === j) continue;
+                    similarities.push({
+                        index: j,
+                        similarity: calculateSimilarity(features[anchorIdx], features[j]),
+                    });
                 }
+                similarities.sort((a, b) => b.similarity - a.similarity);
+
+                // Select a negative from the top N most similar icons.
+                const topK = Math.min(20, similarities.length - 1);
+                negativeIdx = similarities[Math.floor(Math.random() * topK)].index;
             } else {
-                // Fallback: Use augmented versions of same image as positive
-                positiveIdx = anchorIdx;
-
-                // Random negative selection with verification
-                negativeIdx = Math.floor(Math.random() * features.length);
-                let attempts = 0;
-                while (negativeIdx === anchorIdx && attempts < 10) {
+                // Select a random negative.
+                do {
                     negativeIdx = Math.floor(Math.random() * features.length);
-                    attempts++;
-                }
+                } while (negativeIdx === anchorIdx);
             }
 
             anchorData.push(features[anchorIdx]);
@@ -111,31 +77,22 @@ export function generateTriplets(features, numTriplets, options = {}) {
             negativeData.push(features[negativeIdx]);
         }
 
-        // Create tensors with augmentation
-        const anchorTensors = anchorData.map((data) => {
-            const tensor = tf.tensor3d(data, inputShape);
-            return augmentImageTensor(tensor);
-        });
+        // --- IMPROVEMENT: Apply augmentation only during training ---
+        const shouldAugment = !isValidation;
 
-        const positiveTensors = positiveData.map((data, idx) => {
-            const tensor = tf.tensor3d(data, inputShape);
-            // Apply stronger augmentation to positives when they're the same as anchor
-            return augmentImageTensor(tensor);
-        });
+        const toTensor = (data) => tf.tensor3d(data, inputShape);
 
-        const negativeTensors = negativeData.map((data) => {
-            const tensor = tf.tensor3d(data, inputShape);
-            return augmentImageTensor(tensor);
-        });
+        const anchorTensors = anchorData.map(d => shouldAugment ? augmentImageTensor(toTensor(d)) : toTensor(d));
+        const positiveTensors = positiveData.map(d => shouldAugment ? augmentImageTensor(toTensor(d)) : toTensor(d));
+        const negativeTensors = negativeData.map(d => toTensor(d)); // No need to augment negatives
 
         const anchors = tf.stack(anchorTensors);
         const positives = tf.stack(positiveTensors);
         const negatives = tf.stack(negativeTensors);
 
-        // Clean up
-        anchorTensors.forEach(t => t.dispose());
-        positiveTensors.forEach(t => t.dispose());
-        negativeTensors.forEach(t => t.dispose());
+        tf.dispose(anchorTensors);
+        tf.dispose(positiveTensors);
+        tf.dispose(negativeTensors);
 
         return {anchors, positives, negatives};
     });

@@ -10,16 +10,16 @@ const config = {
     modelDir: "./models/icon-similarity",
     epochs: 200,
     batchSize: 32,
-    learningRate: 0.0005, // Lower initial learning rate
+    // A slightly lower, more stable learning rate is often better for triplet loss.
+    learningRate: 0.0001,
     validationSplit: 0.2,
     embeddingDim: 128,
-    patience: 20,
-    minDelta: 0.0001, // More sensitive to improvements
-    margin: 0.2, // Smaller margin for better convergence
-    learningRateDecay: 0.9,
-    learningRateDecaySteps: 25,
-    warmupEpochs: 5, // Warmup period with lower learning rate
+    // Increased patience to allow the model more time to converge.
+    patience: 40,
+    minDelta: 0.0001,
+    margin: 0.2,
 };
+
 
 /**
  * Custom callback to monitor training progress
@@ -64,32 +64,6 @@ class TripletLossCallback extends tf.Callback {
 }
 
 /**
- * Learning rate scheduler with warmup
- */
-function createLearningRateScheduler(initialLr, decayRate, decaySteps, warmupEpochs) {
-    const warmupLr = initialLr * 0.1; // Start at 10% of initial LR
-    let currentLr = warmupLr;
-
-    return {
-        getCurrentLr: () => currentLr,
-        updateLr: (epoch) => {
-            if (epoch < warmupEpochs) {
-                // Linear warmup
-                currentLr = warmupLr + (initialLr - warmupLr) * (epoch / warmupEpochs);
-                console.log(`Warmup: Learning rate = ${currentLr.toFixed(6)}`);
-                return currentLr;
-            } else if ((epoch - warmupEpochs) > 0 && (epoch - warmupEpochs) % decaySteps === 0) {
-                // Decay after warmup
-                currentLr *= decayRate;
-                console.log(`Decay: Learning rate = ${currentLr.toFixed(6)}`);
-                return currentLr;
-            }
-            return currentLr;
-        }
-    };
-}
-
-/**
  * Train the model with improved strategy
  */
 export async function trainModel() {
@@ -112,19 +86,11 @@ export async function trainModel() {
     const model = createModel(inputShape, config.embeddingDim);
 
     // Create initial optimizer
-    let currentOptimizer = tf.train.adam(config.learningRate * 0.1); // Start with warmup LR
-
-    // Create learning rate scheduler
-    const lrScheduler = createLearningRateScheduler(
-        config.learningRate,
-        config.learningRateDecay,
-        config.learningRateDecaySteps,
-        config.warmupEpochs
-    );
+    let optimizer = tf.train.adam(config.learningRate); // Start with warmup LR
 
     // Compile model
     model.compile({
-        optimizer: currentOptimizer,
+        optimizer: optimizer,
         loss: createTripletLoss(config.margin),
     });
 
@@ -132,8 +98,8 @@ export async function trainModel() {
     model.summary();
 
     // Calculate number of triplets per epoch
-    const tripletsPerEpoch = Math.min(features.length * 2, 5000); // More triplets
-    const validationTriplets = Math.floor(tripletsPerEpoch * 0.2);
+    const tripletsPerEpoch = Math.min(features.length, 4000); // Adjusted for clarity
+    const validationTriplets = Math.floor(tripletsPerEpoch * config.validationSplit);
     const trainingTriplets = tripletsPerEpoch - validationTriplets;
 
     console.log(`Triplets per epoch: ${tripletsPerEpoch} (${trainingTriplets} training, ${validationTriplets} validation)`);
@@ -143,7 +109,7 @@ export async function trainModel() {
     const {anchors: anchorsVal, positives: positivesVal, negatives: negativesVal} = generateTriplets(
         features,
         validationTriplets,
-        { hardNegativeMining: true }
+        {hardNegativeMining: true, isValidation: true}
     );
 
     // Concatenate validation triplets
@@ -160,38 +126,17 @@ export async function trainModel() {
 
     console.log("Starting training with improved strategy...");
     let bestValLoss = Infinity;
-    let bestWeights = null;
     let epochsSinceImprovement = 0;
     const history = {loss: [], val_loss: []};
 
     for (let epoch = 0; epoch < config.epochs; epoch++) {
         tripletCallback.setCurrentEpoch(epoch);
 
-        // Update learning rate
-        const newLr = lrScheduler.updateLr(epoch);
-        if (newLr !== lrScheduler.getCurrentLr()) {
-            // Dispose old optimizer
-            currentOptimizer.dispose();
-
-            // Create new optimizer with updated learning rate
-            currentOptimizer = tf.train.adam(newLr);
-
-            // Recompile with new optimizer
-            model.compile({
-                optimizer: currentOptimizer,
-                loss: createTripletLoss(config.margin),
-            });
-        }
-
         // Generate new training data each epoch with progressive difficulty
-        const useHardNegatives = epoch > config.warmupEpochs;
         const {anchors: anchorsTrain, positives: positivesTrain, negatives: negativesTrain} = generateTriplets(
             features,
             trainingTriplets,
-            {
-                hardNegativeMining: useHardNegatives,
-                useSimilaritySearch: epoch > 10 // Enable after initial epochs
-            }
+            {hardNegativeMining: true}
         );
 
         // Concatenate training triplets
@@ -209,6 +154,7 @@ export async function trainModel() {
         });
 
         // Record history
+        tf.dispose([xTrain, yTrain, anchorsTrain, positivesTrain, negativesTrain]);
         const trainLoss = epochHistory.history.loss[0];
         const valLoss = epochHistory.history.val_loss[0];
         history.loss.push(trainLoss);
@@ -218,28 +164,16 @@ export async function trainModel() {
         if (valLoss < bestValLoss - config.minDelta) {
             bestValLoss = valLoss;
             epochsSinceImprovement = 0;
-
-            // Save best weights
-            if (bestWeights) {
-                bestWeights.forEach((w) => w.dispose());
-            }
-            bestWeights = model.getWeights().map((w) => w.clone());
-
-            // Save best model
             await model.save(`file://${config.modelDir}-best`);
-            console.log(
-                `  -> New best model saved (val_loss: ${valLoss.toFixed(6)})`,
-            );
+            console.log(`  -> New best model saved (val_loss: ${valLoss.toFixed(6)})`);
         } else {
             epochsSinceImprovement++;
         }
+        if (epochsSinceImprovement >= config.patience) {
+            console.log(`Early stopping triggered at epoch ${epoch + 1}`);
+            break;
+        }
 
-        // Clean up training data
-        xTrain.dispose();
-        yTrain.dispose();
-        anchorsTrain.dispose();
-        positivesTrain.dispose();
-        negativesTrain.dispose();
 
         // Check if training should stop
         if (isNaN(valLoss) || isNaN(trainLoss)) {
@@ -248,11 +182,8 @@ export async function trainModel() {
         }
 
         // Early stopping
-        if (epochsSinceImprovement >= config.patience && epoch > config.warmupEpochs * 2) {
+        if (epochsSinceImprovement >= config.patience) {
             console.log(`Early stopping triggered at epoch ${epoch + 1}`);
-            if (bestWeights) {
-                model.setWeights(bestWeights);
-            }
             break;
         }
 
@@ -264,10 +195,6 @@ export async function trainModel() {
         }
     }
 
-    // Clean up
-    if (bestWeights) {
-        bestWeights.forEach((w) => w.dispose());
-    }
     xVal.dispose();
     yVal.dispose();
     anchorsVal.dispose();
@@ -318,5 +245,5 @@ export async function trainModel() {
 
     // Cleanup
     model.dispose();
-    currentOptimizer.dispose();
+    optimizer.dispose();
 }
