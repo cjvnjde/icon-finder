@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Icon Finder - Draw to Search</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            color: #2c3e50;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #7f8c8d;
+            font-size: 1.1rem;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 30px;
+            align-items: start;
+        }
+
+        .drawing-section {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            position: sticky;
+            top: 20px;
+        }
+
+        .canvas-container {
+            position: relative;
+            margin-bottom: 20px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        #drawingCanvas {
+            display: block;
+            cursor: crosshair;
+            background: white;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            flex: 1;
+            padding: 10px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #3498db;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #2980b9;
+        }
+
+        .btn-secondary {
+            background: #ecf0f1;
+            color: #34495e;
+        }
+
+        .btn-secondary:hover {
+            background: #d5dbdb;
+        }
+
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+
+        .results-section {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .status {
+            text-align: center;
+            padding: 20px;
+            color: #7f8c8d;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .icons-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .icon-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 15px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            transition: all 0.2s;
+            cursor: pointer;
+            background: #fafafa;
+        }
+
+        .icon-item:hover {
+            border-color: #3498db;
+            background: #f0f8ff;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(52, 152, 219, 0.2);
+        }
+
+        .icon-svg {
+            width: 48px;
+            height: 48px;
+            margin-bottom: 8px;
+        }
+
+        .icon-name {
+            font-size: 11px;
+            color: #555;
+            text-align: center;
+            word-break: break-word;
+            max-width: 100%;
+        }
+
+        .similarity-score {
+            font-size: 10px;
+            color: #3498db;
+            font-weight: 600;
+            margin-top: 4px;
+        }
+
+        .brush-size {
+            margin-top: 15px;
+        }
+
+        .brush-size label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 14px;
+            color: #555;
+        }
+
+        .brush-size input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #e0e0e0;
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        .brush-size input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #3498db;
+            cursor: pointer;
+        }
+
+        .brush-preview {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #333;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+
+            .drawing-section {
+                position: static;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>Icon Finder</h1>
+        <p class="subtitle">Draw a simple shape and find similar icons</p>
+    </header>
+
+    <div class="main-content">
+        <div class="drawing-section">
+            <div class="canvas-container">
+                <canvas id="drawingCanvas" width="300" height="300"></canvas>
+            </div>
+
+            <div class="controls">
+                <button id="searchBtn" class="btn-primary">Search Icons</button>
+                <button id="clearBtn" class="btn-secondary">Clear</button>
+            </div>
+
+            <div class="brush-size">
+                <label for="brushSize">
+                    Brush Size: <span id="brushSizeValue">5</span>px
+                    <span class="brush-preview" id="brushPreview"></span>
+                </label>
+                <input type="range" id="brushSize" min="1" max="20" value="5">
+            </div>
+        </div>
+
+        <div class="results-section">
+            <div id="status" class="status">
+                <span class="loading"></span>
+                Loading model and icons...
+            </div>
+            <div id="results" class="icons-grid" style="display: none;"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Global variables
+    let model = null;
+    let iconData = null;
+    let iconFeatures = null;
+    let isDrawing = false;
+    let ctx = null;
+    let lastX = 0;
+    let lastY = 0;
+
+    // Canvas setup
+    const canvas = document.getElementById('drawingCanvas');
+    ctx = canvas.getContext('2d');
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 5;
+
+    // Clear canvas initially
+    clearCanvas();
+
+    // Brush size control
+    const brushSizeInput = document.getElementById('brushSize');
+    const brushSizeValue = document.getElementById('brushSizeValue');
+    const brushPreview = document.getElementById('brushPreview');
+
+    brushSizeInput.addEventListener('input', (e) => {
+        const size = e.target.value;
+        ctx.lineWidth = size;
+        brushSizeValue.textContent = size;
+        brushPreview.style.width = size + 'px';
+        brushPreview.style.height = size + 'px';
+    });
+
+    // Drawing functionality
+    canvas.addEventListener('mousedown', startDrawing);
+    canvas.addEventListener('mousemove', draw);
+    canvas.addEventListener('mouseup', stopDrawing);
+    canvas.addEventListener('mouseout', stopDrawing);
+
+    // Touch support
+    canvas.addEventListener('touchstart', handleTouch);
+    canvas.addEventListener('touchmove', handleTouch);
+    canvas.addEventListener('touchend', stopDrawing);
+
+    function handleTouch(e) {
+        e.preventDefault();
+        const touch = e.touches[0];
+        const rect = canvas.getBoundingClientRect();
+        const mouseEvent = new MouseEvent(e.type === 'touchstart' ? 'mousedown' : 'mousemove', {
+            clientX: touch.clientX,
+            clientY: touch.clientY
+        });
+        canvas.dispatchEvent(mouseEvent);
+    }
+
+    function startDrawing(e) {
+        isDrawing = true;
+        const rect = canvas.getBoundingClientRect();
+        lastX = e.clientX - rect.left;
+        lastY = e.clientY - rect.top;
+    }
+
+    function draw(e) {
+        if (!isDrawing) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        ctx.beginPath();
+        ctx.moveTo(lastX, lastY);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+
+        lastX = x;
+        lastY = y;
+    }
+
+    function stopDrawing() {
+        isDrawing = false;
+    }
+
+    function clearCanvas() {
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    // Button handlers
+    document.getElementById('clearBtn').addEventListener('click', () => {
+        clearCanvas();
+        document.getElementById('results').innerHTML = '';
+    });
+
+    document.getElementById('searchBtn').addEventListener('click', searchIcons);
+
+    // Preprocess canvas to match training data format
+    function preprocessCanvas() {
+        // Create a temporary canvas for resizing
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = 64;
+        tempCanvas.height = 64;
+        const tempCtx = tempCanvas.getContext('2d');
+
+        // Draw the original canvas scaled down
+        tempCtx.fillStyle = 'white';
+        tempCtx.fillRect(0, 0, 64, 64);
+        tempCtx.drawImage(canvas, 0, 0, 64, 64);
+
+        // Get image data and convert to grayscale
+        const imageData = tempCtx.getImageData(0, 0, 64, 64);
+        const data = imageData.data;
+        const grayscaleData = [];
+
+        for (let i = 0; i < data.length; i += 4) {
+            // Convert to grayscale (simple average)
+            const gray = (data[i] + data[i + 1] + data[i + 2]) / 3;
+            // Invert because we draw black on white, but model expects white on black
+            const inverted = 255 - gray;
+            grayscaleData.push(inverted / 255.0);
+        }
+
+        // Reshape to match model input
+        return tf.tensor3d(grayscaleData, [64, 64, 1]);
+    }
+
+    // Calculate cosine similarity between embeddings
+    function cosineSimilarity(embedding1, embedding2) {
+        return tf.tidy(() => {
+            const a = tf.tensor1d(embedding1);
+            const b = tf.tensor1d(embedding2);
+
+            const dotProduct = tf.sum(tf.mul(a, b));
+            const normA = tf.sqrt(tf.sum(tf.square(a)));
+            const normB = tf.sqrt(tf.sum(tf.square(b)));
+
+            return tf.div(dotProduct, tf.mul(normA, normB));
+        });
+    }
+
+    // Search for similar icons
+    async function searchIcons() {
+        if (!model || !iconData || !iconFeatures) {
+            alert('Model or data not loaded yet. Please wait.');
+            return;
+        }
+
+        const statusEl = document.getElementById('status');
+        const resultsEl = document.getElementById('results');
+
+        statusEl.innerHTML = '<span class="loading"></span>Searching for similar icons...';
+        statusEl.style.display = 'block';
+        resultsEl.style.display = 'none';
+
+        try {
+            // Preprocess the drawing
+            const inputTensor = preprocessCanvas();
+            const batchedInput = inputTensor.expandDims(0);
+
+            // Get embedding for the drawing
+            const drawingEmbedding = await model.predict(batchedInput).data();
+
+            // Calculate similarities with all icons
+            const similarities = [];
+            for (let i = 0; i < iconFeatures.length; i++) {
+                const similarity = await cosineSimilarity(drawingEmbedding, iconFeatures[i]).data();
+                console.log(similarities)
+                similarities.push({
+                    index: i,
+                    similarity: similarity[0],
+                    icon: iconData.icons[i]
+                });
+            }
+
+            // Sort by similarity (descending)
+            similarities.sort((a, b) => b.similarity - a.similarity);
+
+            // Display top results
+            displayResults(similarities.slice(0, 50));
+
+            // Cleanup
+            inputTensor.dispose();
+            batchedInput.dispose();
+
+        } catch (error) {
+            console.error('Search error:', error);
+            statusEl.innerHTML = '<div class="error">Error searching icons: ' + error.message + '</div>';
+        }
+    }
+
+    // Display search results
+    function displayResults(results) {
+        const statusEl = document.getElementById('status');
+        const resultsEl = document.getElementById('results');
+
+        statusEl.style.display = 'none';
+        resultsEl.style.display = 'grid';
+        resultsEl.innerHTML = '';
+
+        results.forEach(result => {
+            const iconItem = document.createElement('div');
+            iconItem.className = 'icon-item';
+            iconItem.onclick = () => {
+                // Copy icon name to clipboard
+                navigator.clipboard.writeText(result.icon.name);
+                alert(`Copied "${result.icon.name}" to clipboard!`);
+            };
+
+            // Create icon element
+            const iconImg = document.createElement('img');
+            iconImg.className = 'icon-svg';
+            iconImg.src = `icons/${result.icon.path}`;
+            iconImg.alt = result.icon.name;
+            iconImg.onerror = function() {
+                this.style.display = 'none';
+                this.parentElement.innerHTML += '<div style="width:48px;height:48px;background:#f0f0f0;display:flex;align-items:center;justify-content:center;color:#999;">?</div>';
+            };
+
+            const iconName = document.createElement('div');
+            iconName.className = 'icon-name';
+            iconName.textContent = result.icon.name;
+
+            const similarityScore = document.createElement('div');
+            similarityScore.className = 'similarity-score';
+            similarityScore.textContent = `${(result.similarity * 100).toFixed(1)}%`;
+
+            iconItem.appendChild(iconImg);
+            iconItem.appendChild(iconName);
+            iconItem.appendChild(similarityScore);
+            resultsEl.appendChild(iconItem);
+        });
+    }
+
+    // Load model and data
+    async function initialize() {
+        const statusEl = document.getElementById('status');
+
+        try {
+            // Load the model
+            statusEl.innerHTML = '<span class="loading"></span>Loading model...';
+            model = await tf.loadLayersModel('models/icon-similarity/model.json');
+            console.log('Model loaded successfully');
+
+            // Load icon metadata
+            statusEl.innerHTML = '<span class="loading"></span>Loading icon data...';
+            const iconDataResponse = await fetch('icon-data.json');
+            iconData = await iconDataResponse.json();
+            console.log(`Loaded ${iconData.totalIcons} icons`);
+
+            // Load pre-computed features
+            statusEl.innerHTML = '<span class="loading"></span>Loading icon features...';
+            const featuresResponse = await fetch('features.json');
+            const featuresArray = await featuresResponse.json();
+
+            // Process features through the model to get embeddings
+            statusEl.innerHTML = '<span class="loading"></span>Processing icon embeddings...';
+            iconFeatures = [];
+
+            // Process in batches to avoid memory issues
+            const batchSize = 100;
+            for (let i = 0; i < featuresArray.length; i += batchSize) {
+                const batch = featuresArray.slice(i, i + batchSize);
+
+                // Convert flat arrays to the correct shape
+                const batchData = [];
+                for (const features of batch) {
+                    // Ensure features is an array
+                    const flatArray = Array.isArray(features) ? features : Array.from(features);
+
+                    // Reshape flat array (4096 values) to 64x64x1
+                    const reshaped = [];
+                    for (let y = 0; y < 64; y++) {
+                        const row = [];
+                        for (let x = 0; x < 64; x++) {
+                            const idx = y * 64 + x;
+                            row.push([flatArray[idx] || 0]); // Ensure we have a value
+                        }
+                        reshaped.push(row);
+                    }
+                    batchData.push(reshaped);
+                }
+
+                const batchTensor = tf.tensor4d(batchData, [batch.length, 64, 64, 1]);
+                const embeddings = await model.predict(batchTensor).array();
+                iconFeatures.push(...embeddings);
+                batchTensor.dispose();
+
+                // Update progress
+                const progress = Math.min(100, (i + batchSize) / featuresArray.length * 100);
+                statusEl.innerHTML = `<span class="loading"></span>Processing embeddings... ${progress.toFixed(0)}%`;
+            }
+
+            statusEl.innerHTML = '<div style="color:#27ae60;">✓ Ready! Draw something and click "Search Icons"</div>';
+
+        } catch (error) {
+            console.error('Initialization error:', error);
+            statusEl.innerHTML = '<div class="error">Error loading model or data: ' + error.message + '</div>';
+        }
+    }
+
+    // Initialize on load
+    window.addEventListener('load', initialize);
+</script>
+</body>
+</html>

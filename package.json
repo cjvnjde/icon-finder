@@ -1,0 +1,13 @@
+{
+  "name": "icon-finder",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "preprocess": "node ./src/preprocess.js",
+    "train": "node ./src/index.js"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs-node": "^4.22.0",
+    "sharp": "^0.34.2"
+  }
+}
