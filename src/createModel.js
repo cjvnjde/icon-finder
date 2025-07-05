@@ -1,7 +1,8 @@
 import tf from "@tensorflow/tfjs-node";
 
 /**
- * Create the embedding model optimized for sketch-to-icon similarity
+ * Create an improved embedding model for sketch-to-icon similarity
+ * Alternative version without globalAveragePooling2d
  * @param {number[]} inputShape - Shape of input images [height, width, channels]
  * @param {number} embeddingDim - Dimension of the embedding space
  * @returns {tf.Sequential} The model
@@ -15,7 +16,25 @@ export function createModel(inputShape, embeddingDim = 128) {
         }),
     );
 
-    // First conv block
+    // First conv block - fewer filters for simpler features
+    model.add(
+        tf.layers.conv2d({
+            filters: 16,
+            kernelSize: 5,
+            activation: "relu",
+            padding: "same",
+            kernelInitializer: "heNormal",
+        }),
+    );
+    model.add(tf.layers.batchNormalization());
+    model.add(
+        tf.layers.maxPooling2d({
+            poolSize: 2,
+            strides: 2,
+        }),
+    );
+
+    // Second conv block
     model.add(
         tf.layers.conv2d({
             filters: 32,
@@ -32,13 +51,8 @@ export function createModel(inputShape, embeddingDim = 128) {
             strides: 2,
         }),
     );
-    model.add(
-        tf.layers.dropout({
-            rate: 0.1,
-        }),
-    );
 
-    // Second conv block
+    // Third conv block
     model.add(
         tf.layers.conv2d({
             filters: 64,
@@ -49,60 +63,41 @@ export function createModel(inputShape, embeddingDim = 128) {
         }),
     );
     model.add(tf.layers.batchNormalization());
+
+    // Alternative to globalAveragePooling2d: Use regular pooling + flatten
     model.add(
         tf.layers.maxPooling2d({
             poolSize: 2,
             strides: 2,
         }),
     );
+
+    // Flatten for dense layers
+    model.add(tf.layers.flatten());
+
+    // Reduced dropout to help learning
     model.add(
         tf.layers.dropout({
             rate: 0.2,
         }),
     );
 
-    // Third conv block
+    // Dense layers
     model.add(
-        tf.layers.conv2d({
-            filters: 128,
-            kernelSize: 3,
+        tf.layers.dense({
+            units: 512,
             activation: "relu",
-            padding: "same",
             kernelInitializer: "heNormal",
         }),
     );
     model.add(tf.layers.batchNormalization());
-    model.add(
-        tf.layers.maxPooling2d({
-            poolSize: 2,
-            strides: 2,
-        }),
-    );
     model.add(
         tf.layers.dropout({
             rate: 0.3,
         }),
     );
 
-    // Flatten
-    model.add(tf.layers.flatten());
-
-    // Dense layers
-    model.add(
-        tf.layers.dense({
-            units: 256,
-            activation: "relu",
-            kernelInitializer: "heNormal",
-        }),
-    );
-    model.add(tf.layers.batchNormalization());
-    model.add(
-        tf.layers.dropout({
-            rate: 0.4,
-        }),
-    );
-
-    // Embedding layer
+    // Embedding layer - we'll handle L2 normalization in the loss function
     model.add(
         tf.layers.dense({
             units: embeddingDim,

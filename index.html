@@ -382,7 +382,7 @@
 
     document.getElementById('searchBtn').addEventListener('click', searchIcons);
 
-    // Preprocess canvas to match training data format
+    // Preprocess canvas to match training data format (2 channels)
     function preprocessCanvas() {
         // Create a temporary canvas for resizing
         const tempCanvas = document.createElement('canvas');
@@ -408,8 +408,15 @@
             grayscaleData.push(inverted / 255.0);
         }
 
-        // Reshape to match model input
-        return tf.tensor3d(grayscaleData, [64, 64, 1]);
+        // Create 2-channel data by duplicating the grayscale channel
+        const twoChannelData = [];
+        for (let i = 0; i < grayscaleData.length; i++) {
+            twoChannelData.push(grayscaleData[i]); // First channel
+            twoChannelData.push(grayscaleData[i]); // Second channel (duplicate)
+        }
+
+        // Reshape to match model input [64, 64, 2]
+        return tf.tensor3d(twoChannelData, [64, 64, 2]);
     }
 
     // Optimized vectorized cosine similarity calculation
@@ -532,6 +539,16 @@
         });
     }
 
+    // Helper function to process features to 2-channel format
+    function processFeaturesToTwoChannel(features) {
+        const twoChannelData = [];
+        for (let i = 0; i < features.length; i++) {
+            twoChannelData.push(features[i]); // First channel
+            twoChannelData.push(features[i]); // Second channel (duplicate)
+        }
+        return twoChannelData;
+    }
+
     // Optimized initialization
     async function initialize() {
         const statusEl = document.getElementById('status');
@@ -562,21 +579,24 @@
             for (let i = 0; i < featuresArray.length; i += batchSize) {
                 const batch = featuresArray.slice(i, i + batchSize);
 
-                // Prepare batch data more efficiently
-                const batchData = new Float32Array(batch.length * 64 * 64);
+                // Prepare batch data with 2 channels
+                const batchData = new Float32Array(batch.length * 64 * 64 * 2);
 
                 for (let j = 0; j < batch.length; j++) {
                     const features = batch[j];
                     const flatArray = Array.isArray(features) ? features : Array.from(features);
 
+                    // Convert to 2-channel format
+                    const twoChannelFeatures = processFeaturesToTwoChannel(flatArray);
+
                     // Copy data directly to typed array
-                    for (let k = 0; k < 64 * 64; k++) {
-                        batchData[j * 64 * 64 + k] = flatArray[k] || 0;
+                    for (let k = 0; k < 64 * 64 * 2; k++) {
+                        batchData[j * 64 * 64 * 2 + k] = twoChannelFeatures[k] || 0;
                     }
                 }
 
-                // Create tensor from typed array
-                const batchTensor = tf.tensor4d(batchData, [batch.length, 64, 64, 1]);
+                // Create tensor from typed array with 2 channels
+                const batchTensor = tf.tensor4d(batchData, [batch.length, 64, 64, 2]);
 
                 // Get embeddings
                 const embeddings = model.predict(batchTensor);

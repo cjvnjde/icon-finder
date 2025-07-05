@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "preprocess": "node ./src/run-preprocess-icons.js",
-    "train": "node ./src/run-train-model.js"
+    "train": "node ./src/run-train-model.js",
+    "test": "node ./src/test-similarity.js"
   },
   "dependencies": {
     "@tensorflow/tfjs-node": "^4.22.0",

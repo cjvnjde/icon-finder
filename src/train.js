@@ -1,4 +1,3 @@
-// file: src/train.js
 import tf from "@tensorflow/tfjs-node";
 import fs from "node:fs";
 import path from "node:path";
@@ -9,16 +8,17 @@ import {generateTriplets} from "./generateTriplets.js";
 
 const config = {
     modelDir: "./models/icon-similarity",
-    epochs: 100,
-    batchSize: 24,
-    learningRate: 0.001,
+    epochs: 200,
+    batchSize: 32,
+    learningRate: 0.0005, // Lower initial learning rate
     validationSplit: 0.2,
     embeddingDim: 128,
-    patience: 15,
-    minDelta: 0.001,
-    margin: 0.5,
-    learningRateDecay: 0.8,
-    learningRateDecaySteps: 20,
+    patience: 20,
+    minDelta: 0.0001, // More sensitive to improvements
+    margin: 0.2, // Smaller margin for better convergence
+    learningRateDecay: 0.9,
+    learningRateDecaySteps: 25,
+    warmupEpochs: 5, // Warmup period with lower learning rate
 };
 
 /**
@@ -29,6 +29,7 @@ class TripletLossCallback extends tf.Callback {
         super();
         this.losses = [];
         this.valLosses = [];
+        this.bestValLoss = Infinity;
     }
 
     setCurrentEpoch(epoch) {
@@ -36,12 +37,8 @@ class TripletLossCallback extends tf.Callback {
     }
 
     async onEpochEnd(epoch, logs) {
-        const loss =
-            typeof logs.loss === "number" ? logs.loss : logs.loss.dataSync()[0];
-        const valLoss =
-            typeof logs.val_loss === "number"
-                ? logs.val_loss
-                : logs.val_loss.dataSync()[0];
+        const loss = typeof logs.loss === "number" ? logs.loss : logs.loss.dataSync()[0];
+        const valLoss = typeof logs.val_loss === "number" ? logs.val_loss : logs.val_loss.dataSync()[0];
 
         this.losses.push(loss);
         this.valLosses.push(valLoss);
@@ -49,37 +46,51 @@ class TripletLossCallback extends tf.Callback {
         // Check for NaN
         if (isNaN(loss) || isNaN(valLoss)) {
             console.error("NaN loss detected! Training may be unstable.");
+            return;
         }
 
-        // Log meaningful metrics
+        // Check for improvement
+        const improvement = this.bestValLoss - valLoss;
+        if (valLoss < this.bestValLoss) {
+            this.bestValLoss = valLoss;
+        }
+
+        // Log meaningful metrics with improvement indicator
+        const improvementStr = improvement > 0 ? `↓${improvement.toFixed(6)}` : "";
         console.log(
-            `Epoch ${this.currentEpoch + 1}: loss=${loss.toFixed(6)}, val_loss=${valLoss.toFixed(6)}`,
+            `Epoch ${this.currentEpoch + 1}: loss=${loss.toFixed(6)}, val_loss=${valLoss.toFixed(6)} ${improvementStr}`,
         );
     }
 }
 
 /**
- * Learning rate scheduler helper
+ * Learning rate scheduler with warmup
  */
-function createLearningRateScheduler(initialLr, decayRate, decaySteps) {
-    let currentLr = initialLr;
-    let step = 0;
+function createLearningRateScheduler(initialLr, decayRate, decaySteps, warmupEpochs) {
+    const warmupLr = initialLr * 0.1; // Start at 10% of initial LR
+    let currentLr = warmupLr;
 
     return {
         getCurrentLr: () => currentLr,
-        shouldDecay: (epoch) => {
-            return epoch > 0 && epoch % decaySteps === 0;
-        },
-        decay: () => {
-            currentLr *= decayRate;
-            console.log(`Reducing learning rate to ${currentLr}`);
+        updateLr: (epoch) => {
+            if (epoch < warmupEpochs) {
+                // Linear warmup
+                currentLr = warmupLr + (initialLr - warmupLr) * (epoch / warmupEpochs);
+                console.log(`Warmup: Learning rate = ${currentLr.toFixed(6)}`);
+                return currentLr;
+            } else if ((epoch - warmupEpochs) > 0 && (epoch - warmupEpochs) % decaySteps === 0) {
+                // Decay after warmup
+                currentLr *= decayRate;
+                console.log(`Decay: Learning rate = ${currentLr.toFixed(6)}`);
+                return currentLr;
+            }
             return currentLr;
         }
     };
 }
 
 /**
- * Train the model
+ * Train the model with improved strategy
  */
 export async function trainModel() {
     console.log("Loading processed data...");
@@ -101,13 +112,14 @@ export async function trainModel() {
     const model = createModel(inputShape, config.embeddingDim);
 
     // Create initial optimizer
-    let currentOptimizer = tf.train.adam(config.learningRate);
+    let currentOptimizer = tf.train.adam(config.learningRate * 0.1); // Start with warmup LR
 
     // Create learning rate scheduler
     const lrScheduler = createLearningRateScheduler(
         config.learningRate,
         config.learningRateDecay,
-        config.learningRateDecaySteps
+        config.learningRateDecaySteps,
+        config.warmupEpochs
     );
 
     // Compile model
@@ -120,20 +132,21 @@ export async function trainModel() {
     model.summary();
 
     // Calculate number of triplets per epoch
-    const tripletsPerEpoch = Math.min(features.length, 2000);
+    const tripletsPerEpoch = Math.min(features.length * 2, 5000); // More triplets
     const validationTriplets = Math.floor(tripletsPerEpoch * 0.2);
     const trainingTriplets = tripletsPerEpoch - validationTriplets;
 
     console.log(`Triplets per epoch: ${tripletsPerEpoch} (${trainingTriplets} training, ${validationTriplets} validation)`);
 
-    // Generate validation data once
+    // Generate validation data with hard negative mining
     console.log("Generating validation data...");
     const {anchors: anchorsVal, positives: positivesVal, negatives: negativesVal} = generateTriplets(
         features,
-        validationTriplets
+        validationTriplets,
+        { hardNegativeMining: true }
     );
 
-    // Concatenate validation triplets for model input
+    // Concatenate validation triplets
     const xVal = tf.concat([anchorsVal, positivesVal, negativesVal], 0);
     const yVal = tf.zeros([validationTriplets * 3, config.embeddingDim]);
 
@@ -145,7 +158,7 @@ export async function trainModel() {
 
     const tripletCallback = new TripletLossCallback();
 
-    console.log("Starting training...");
+    console.log("Starting training with improved strategy...");
     let bestValLoss = Infinity;
     let bestWeights = null;
     let epochsSinceImprovement = 0;
@@ -154,11 +167,10 @@ export async function trainModel() {
     for (let epoch = 0; epoch < config.epochs; epoch++) {
         tripletCallback.setCurrentEpoch(epoch);
 
-        // Learning rate decay
-        if (lrScheduler.shouldDecay(epoch)) {
-            const newLr = lrScheduler.decay();
-
-            // Dispose old optimizer to prevent memory leaks
+        // Update learning rate
+        const newLr = lrScheduler.updateLr(epoch);
+        if (newLr !== lrScheduler.getCurrentLr()) {
+            // Dispose old optimizer
             currentOptimizer.dispose();
 
             // Create new optimizer with updated learning rate
@@ -171,13 +183,18 @@ export async function trainModel() {
             });
         }
 
-        // Generate new training data each epoch
+        // Generate new training data each epoch with progressive difficulty
+        const useHardNegatives = epoch > config.warmupEpochs;
         const {anchors: anchorsTrain, positives: positivesTrain, negatives: negativesTrain} = generateTriplets(
             features,
-            trainingTriplets
+            trainingTriplets,
+            {
+                hardNegativeMining: useHardNegatives,
+                useSimilaritySearch: epoch > 10 // Enable after initial epochs
+            }
         );
 
-        // Concatenate training triplets for model input
+        // Concatenate training triplets
         const xTrain = tf.concat([anchorsTrain, positivesTrain, negativesTrain], 0);
         const yTrain = tf.zeros([trainingTriplets * 3, config.embeddingDim]);
 
@@ -188,6 +205,7 @@ export async function trainModel() {
             validationData: [xVal, yVal],
             callbacks: [tripletCallback],
             verbose: 0,
+            shuffle: true,
         });
 
         // Record history
@@ -229,8 +247,8 @@ export async function trainModel() {
             break;
         }
 
-        // Manual early stopping
-        if (epochsSinceImprovement >= config.patience) {
+        // Early stopping
+        if (epochsSinceImprovement >= config.patience && epoch > config.warmupEpochs * 2) {
             console.log(`Early stopping triggered at epoch ${epoch + 1}`);
             if (bestWeights) {
                 model.setWeights(bestWeights);
@@ -238,9 +256,11 @@ export async function trainModel() {
             break;
         }
 
-        // Log progress every 10 epochs
+        // Log progress
         if ((epoch + 1) % 10 === 0) {
-            console.log(`Progress: ${epoch + 1}/${config.epochs} epochs completed`);
+            const avgLoss = history.loss.slice(-10).reduce((a, b) => a + b) / 10;
+            const avgValLoss = history.val_loss.slice(-10).reduce((a, b) => a + b) / 10;
+            console.log(`Progress: ${epoch + 1}/${config.epochs} epochs | Avg loss: ${avgLoss.toFixed(6)} | Avg val_loss: ${avgValLoss.toFixed(6)}`);
         }
     }
 
@@ -258,12 +278,14 @@ export async function trainModel() {
     console.log("Saving final model...");
     await model.save(`file://${config.modelDir}`);
 
-    // Save training metrics
+    // Save comprehensive metrics
     const metrics = {
         loss: history.loss,
         valLoss: history.val_loss,
         epochs: history.loss.length,
         bestEpoch: history.val_loss.indexOf(Math.min(...history.val_loss)),
+        bestValLoss: Math.min(...history.val_loss),
+        finalValLoss: history.val_loss[history.val_loss.length - 1],
         trainedAt: new Date().toISOString(),
         config: config,
     };
@@ -287,14 +309,12 @@ export async function trainModel() {
         JSON.stringify(modelMetadata, null, 2),
     );
 
-    console.log("Training completed!");
+    console.log("\n=== Training Summary ===");
+    console.log(`Total epochs: ${metrics.epochs}`);
     console.log(`Best epoch: ${metrics.bestEpoch + 1}`);
-    console.log(
-        `Best validation loss: ${Math.min(...metrics.valLoss).toFixed(6)}`,
-    );
-    console.log(
-        `Final validation loss: ${metrics.valLoss[metrics.valLoss.length - 1].toFixed(6)}`,
-    );
+    console.log(`Best validation loss: ${metrics.bestValLoss.toFixed(6)}`);
+    console.log(`Final validation loss: ${metrics.finalValLoss.toFixed(6)}`);
+    console.log(`Improvement: ${((1 - metrics.bestValLoss) * 100).toFixed(2)}%`);
 
     // Cleanup
     model.dispose();
