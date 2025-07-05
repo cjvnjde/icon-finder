@@ -18,6 +18,23 @@ const config = {
     margin: 0.5, // Increased margin
 };
 
+export function createLearningRateScheduler(initialLr, decayFactor = 0.8, decaySteps = 20) {
+    let currentLr = initialLr;
+    let step = 0;
+
+    return {
+        getCurrentLr: () => currentLr,
+        step: () => {
+            step++;
+            if (step % decaySteps === 0) {
+                currentLr *= decayFactor;
+                console.log(`Reducing learning rate to ${currentLr}`);
+            }
+            return currentLr;
+        }
+    };
+}
+
 /**
  * Custom callback to monitor training progress
  */
@@ -75,9 +92,12 @@ export async function trainModel() {
     // Use a learning rate scheduler
     let currentLearningRate = config.learningRate;
 
+    const lrScheduler = createLearningRateScheduler(config.learningRate);
+    const optimizer = tf.train.adam(config.learningRate);
+
     // Compile model
     model.compile({
-        optimizer: tf.train.adam(currentLearningRate),
+        optimizer: optimizer,
         loss: createTripletLoss(config.margin),
     });
 
@@ -91,11 +111,14 @@ export async function trainModel() {
 
     // Generate validation data once
     console.log("Generating validation data...");
-    const {x: xVal, y: yVal} = generateTriplets(
+    const {anchors: anchorsVal, positives: positivesVal, negatives: negativesVal} = generateTriplets(
         features,
         validationTriplets,
-        config.embeddingDim
     );
+
+    // Concatenate validation triplets for model input
+    const xVal = tf.concat([anchorsVal, positivesVal, negativesVal], 0);
+    const yVal = tf.zeros([validationTriplets * 3, config.embeddingDim]);
 
     // Ensure model directory exists
     const modelDir = path.dirname(config.modelDir);
@@ -116,20 +139,19 @@ export async function trainModel() {
 
         // Learning rate decay
         if (epoch > 0 && epoch % 20 === 0) {
-            currentLearningRate *= 0.8;
-            console.log(`Reducing learning rate to ${currentLearningRate}`);
-            model.compile({
-                optimizer: tf.train.adam(currentLearningRate),
-                loss: createTripletLoss(config.margin),
-            });
+            const newLr = lrScheduler.step();
+            optimizer.setLearningRate(newLr);
         }
 
         // Generate new training data each epoch
-        const {x: xTrain, y: yTrain} = generateTriplets(
+        const {anchors: anchorsTrain, positives: positivesTrain, negatives: negativesTrain} = generateTriplets(
             features,
             trainingTriplets,
-            config.embeddingDim
         );
+
+        // Concatenate training triplets for model input
+        const xTrain = tf.concat([anchorsTrain, positivesTrain, negativesTrain], 0);
+        const yTrain = tf.zeros([trainingTriplets * 3, config.embeddingDim]);
 
         // Train for one epoch
         const epochHistory = await model.fit(xTrain, yTrain, {
@@ -169,6 +191,9 @@ export async function trainModel() {
         // Clean up training data
         xTrain.dispose();
         yTrain.dispose();
+        anchorsTrain.dispose();
+        positivesTrain.dispose();
+        negativesTrain.dispose();
 
         // Check if training should stop
         if (isNaN(valLoss) || isNaN(trainLoss)) {
@@ -192,6 +217,9 @@ export async function trainModel() {
     }
     xVal.dispose();
     yVal.dispose();
+    anchorsVal.dispose();
+    positivesVal.dispose();
+    negativesVal.dispose();
 
     // Save final model
     console.log("Saving final model...");
