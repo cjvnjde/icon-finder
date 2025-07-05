@@ -291,7 +291,7 @@
     // Global variables
     let model = null;
     let iconData = null;
-    let iconFeatures = null;
+    let iconEmbeddings = null; // Store processed embeddings as tensor
     let isDrawing = false;
     let ctx = null;
     let lastX = 0;
@@ -412,23 +412,30 @@
         return tf.tensor3d(grayscaleData, [64, 64, 1]);
     }
 
-    // Calculate cosine similarity between embeddings
-    function cosineSimilarity(embedding1, embedding2) {
+    // Optimized vectorized cosine similarity calculation
+    function calculateSimilarities(queryEmbedding, allEmbeddings) {
         return tf.tidy(() => {
-            const a = tf.tensor1d(embedding1);
-            const b = tf.tensor1d(embedding2);
+            // Ensure query embedding is 2D [1, embeddingSize]
+            const query = queryEmbedding.shape.length === 1 ? queryEmbedding.expandDims(0) : queryEmbedding;
 
-            const dotProduct = tf.sum(tf.mul(a, b));
-            const normA = tf.sqrt(tf.sum(tf.square(a)));
-            const normB = tf.sqrt(tf.sum(tf.square(b)));
+            // Calculate dot products: [1, embeddingSize] x [numIcons, embeddingSize]^T = [1, numIcons]
+            const dotProducts = tf.matMul(query, allEmbeddings, false, true);
 
-            return tf.div(dotProduct, tf.mul(normA, normB));
+            // Calculate norms
+            const queryNorm = tf.norm(query, 'euclidean', 1, true); // [1, 1]
+            const allNorms = tf.norm(allEmbeddings, 'euclidean', 1, true); // [numIcons, 1]
+
+            // Calculate cosine similarities: dotProducts / (queryNorm * allNorms^T)
+            const normProducts = tf.matMul(queryNorm, allNorms, false, true); // [1, numIcons]
+            const similarities = tf.div(dotProducts, normProducts);
+
+            return similarities.squeeze(); // Remove batch dimension: [numIcons]
         });
     }
 
-    // Search for similar icons
+    // Search for similar icons - OPTIMIZED VERSION
     async function searchIcons() {
-        if (!model || !iconData || !iconFeatures) {
+        if (!model || !iconData || !iconEmbeddings) {
             alert('Model or data not loaded yet. Please wait.');
             return;
         }
@@ -446,29 +453,35 @@
             const batchedInput = inputTensor.expandDims(0);
 
             // Get embedding for the drawing
-            const drawingEmbedding = await model.predict(batchedInput).data();
+            const drawingEmbedding = model.predict(batchedInput);
 
-            // Calculate similarities with all icons
-            const similarities = [];
-            for (let i = 0; i < iconFeatures.length; i++) {
-                const similarity = await cosineSimilarity(drawingEmbedding, iconFeatures[i]).data();
-                console.log(similarities)
-                similarities.push({
+            // Calculate similarities with all icons using vectorized operations
+            const similarities = calculateSimilarities(drawingEmbedding, iconEmbeddings);
+
+            // Get similarity scores as array
+            const similarityScores = await similarities.data();
+
+            // Create results array with icon metadata
+            const results = [];
+            for (let i = 0; i < similarityScores.length; i++) {
+                results.push({
                     index: i,
-                    similarity: similarity[0],
+                    similarity: similarityScores[i],
                     icon: iconData.icons[i]
                 });
             }
 
             // Sort by similarity (descending)
-            similarities.sort((a, b) => b.similarity - a.similarity);
+            results.sort((a, b) => b.similarity - a.similarity);
 
             // Display top results
-            displayResults(similarities.slice(0, 50));
+            displayResults(results.slice(0, 50));
 
-            // Cleanup
+            // Cleanup tensors
             inputTensor.dispose();
             batchedInput.dispose();
+            drawingEmbedding.dispose();
+            similarities.dispose();
 
         } catch (error) {
             console.error('Search error:', error);
@@ -519,7 +532,7 @@
         });
     }
 
-    // Load model and data
+    // Optimized initialization
     async function initialize() {
         const statusEl = document.getElementById('status');
 
@@ -535,48 +548,57 @@
             iconData = await iconDataResponse.json();
             console.log(`Loaded ${iconData.totalIcons} icons`);
 
-            // Load pre-computed features
+            // Load and process pre-computed features
             statusEl.innerHTML = '<span class="loading"></span>Loading icon features...';
             const featuresResponse = await fetch('features.json');
             const featuresArray = await featuresResponse.json();
 
-            // Process features through the model to get embeddings
+            // Process features through the model to get embeddings - OPTIMIZED
             statusEl.innerHTML = '<span class="loading"></span>Processing icon embeddings...';
-            iconFeatures = [];
 
-            // Process in batches to avoid memory issues
-            const batchSize = 100;
+            const batchSize = 100; // Adjust based on your memory constraints
+            const allEmbeddings = [];
+
             for (let i = 0; i < featuresArray.length; i += batchSize) {
                 const batch = featuresArray.slice(i, i + batchSize);
 
-                // Convert flat arrays to the correct shape
-                const batchData = [];
-                for (const features of batch) {
-                    // Ensure features is an array
+                // Prepare batch data more efficiently
+                const batchData = new Float32Array(batch.length * 64 * 64);
+
+                for (let j = 0; j < batch.length; j++) {
+                    const features = batch[j];
                     const flatArray = Array.isArray(features) ? features : Array.from(features);
 
-                    // Reshape flat array (4096 values) to 64x64x1
-                    const reshaped = [];
-                    for (let y = 0; y < 64; y++) {
-                        const row = [];
-                        for (let x = 0; x < 64; x++) {
-                            const idx = y * 64 + x;
-                            row.push([flatArray[idx] || 0]); // Ensure we have a value
-                        }
-                        reshaped.push(row);
+                    // Copy data directly to typed array
+                    for (let k = 0; k < 64 * 64; k++) {
+                        batchData[j * 64 * 64 + k] = flatArray[k] || 0;
                     }
-                    batchData.push(reshaped);
                 }
 
+                // Create tensor from typed array
                 const batchTensor = tf.tensor4d(batchData, [batch.length, 64, 64, 1]);
-                const embeddings = await model.predict(batchTensor).array();
-                iconFeatures.push(...embeddings);
+
+                // Get embeddings
+                const embeddings = model.predict(batchTensor);
+                const embeddingData = await embeddings.data();
+
+                // Store embeddings
+                allEmbeddings.push(...embeddingData);
+
+                // Clean up
                 batchTensor.dispose();
+                embeddings.dispose();
 
                 // Update progress
                 const progress = Math.min(100, (i + batchSize) / featuresArray.length * 100);
                 statusEl.innerHTML = `<span class="loading"></span>Processing embeddings... ${progress.toFixed(0)}%`;
             }
+
+            // Convert to tensor for efficient similarity calculations
+            const embeddingSize = allEmbeddings.length / featuresArray.length;
+            iconEmbeddings = tf.tensor2d(allEmbeddings, [featuresArray.length, embeddingSize]);
+
+            console.log(`Processed ${featuresArray.length} icon embeddings`);
 
             statusEl.innerHTML = '<div style="color:#27ae60;">✓ Ready! Draw something and click "Search Icons"</div>';
 

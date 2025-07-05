@@ -11,13 +11,13 @@ import { createModel } from "./createModel.js";
 const config = {
   modelDir: "./models/icon-similarity",
   epochs: 100,
-  batchSize: 24, // Reduced batch size
-  learningRate: 0.0001, // Much lower learning rate
+  batchSize: 24,
+  learningRate: 0.001, // Increased learning rate
   validationSplit: 0.2,
   embeddingDim: 128,
-  patience: 10,
+  patience: 15, // Increased patience
   minDelta: 0.001,
-  margin: 0.2, // Reduced margin for stability
+  margin: 0.5, // Increased margin
 };
 
 /**
@@ -28,12 +28,10 @@ const config = {
 function createTripletLoss(margin = 0.5) {
   return (yTrue, yPred) => {
     return tf.tidy(() => {
-      // Get batch dimensions
       const batchSize = yPred.shape[0];
       const embeddingDim = yPred.shape[1];
-
-      // Ensure batch size is divisible by 3
       const numTriplets = Math.floor(batchSize / 3);
+
       if (numTriplets === 0) {
         return tf.scalar(0);
       }
@@ -49,109 +47,115 @@ function createTripletLoss(margin = 0.5) {
         [numTriplets, embeddingDim],
       );
 
-      // L2 normalize embeddings with better numerical stability
-      const epsilon = tf.scalar(1e-6);
+      // L2 normalize embeddings
+      const epsilon = 1e-8;
+      const anchorNorm = tf.norm(anchors, 2, 1, true).add(epsilon);
+      const positiveNorm = tf.norm(positives, 2, 1, true).add(epsilon);
+      const negativeNorm = tf.norm(negatives, 2, 1, true).add(epsilon);
 
-      // Normalize each set separately
-      const anchorNorm = tf.sqrt(
-        tf.maximum(tf.sum(tf.square(anchors), 1, true), epsilon),
-      );
-      const positiveNorm = tf.sqrt(
-        tf.maximum(tf.sum(tf.square(positives), 1, true), epsilon),
-      );
-      const negativeNorm = tf.sqrt(
-        tf.maximum(tf.sum(tf.square(negatives), 1, true), epsilon),
-      );
+      const normalizedAnchors = anchors.div(anchorNorm);
+      const normalizedPositives = positives.div(positiveNorm);
+      const normalizedNegatives = negatives.div(negativeNorm);
 
-      const normalizedAnchors = tf.div(anchors, anchorNorm);
-      const normalizedPositives = tf.div(positives, positiveNorm);
-      const normalizedNegatives = tf.div(negatives, negativeNorm);
-
-      // Calculate squared Euclidean distances
-      // d(a,b) = ||a-b||^2 = ||a||^2 + ||b||^2 - 2*<a,b>
-      // Since we normalized, ||a||^2 = ||b||^2 = 1
-      // So d(a,b) = 2 - 2*<a,b>
-
-      const anchorPosDot = tf.sum(
-        tf.mul(normalizedAnchors, normalizedPositives),
+      // Calculate Euclidean distances
+      const posDistance = tf.norm(
+        normalizedAnchors.sub(normalizedPositives),
+        2,
         1,
       );
-      const anchorNegDot = tf.sum(
-        tf.mul(normalizedAnchors, normalizedNegatives),
+      const negDistance = tf.norm(
+        normalizedAnchors.sub(normalizedNegatives),
+        2,
         1,
       );
 
-      // Clamp dot products to [-1, 1] to avoid numerical issues
-      const clampedPosDot = tf.clipByValue(anchorPosDot, -1, 1);
-      const clampedNegDot = tf.clipByValue(anchorNegDot, -1, 1);
-
-      // Convert to distances
-      const posDistance = tf.mul(
-        tf.scalar(2),
-        tf.sub(tf.scalar(1), clampedPosDot),
-      );
-      const negDistance = tf.mul(
-        tf.scalar(2),
-        tf.sub(tf.scalar(1), clampedNegDot),
-      );
-
-      // Triplet loss with margin
+      // Triplet loss: max(0, pos_dist - neg_dist + margin)
       const losses = tf.maximum(
         tf.scalar(0),
-        tf.add(tf.sub(posDistance, negDistance), tf.scalar(margin)),
+        posDistance.sub(negDistance).add(margin),
       );
 
-      // Return mean loss with a small epsilon to avoid exact zero
-      const meanLoss = tf.mean(losses);
-      return tf.add(meanLoss, tf.scalar(1e-7));
+      return tf.mean(losses);
     });
   };
 }
 
 /**
- * Augment an image tensor
+ * Augment an image tensor with more aggressive augmentation
  * @param {tf.Tensor3D} tensor - Image tensor
  * @returns {tf.Tensor3D} Augmented image tensor
  */
 function augmentImageTensor(tensor) {
   return tf.tidy(() => {
-    let augmented = tensor;
+    let augmented = tensor.clone(); // Start with a clone
 
     // Random horizontal flip
     if (Math.random() > 0.5) {
-      augmented = tf.reverse(augmented, 1);
+      const flipped = tf.reverse(augmented, 1);
+      augmented.dispose();
+      augmented = flipped;
     }
 
-    // Random small rotation (-15 to +15 degrees)
-    if (Math.random() > 0.7) {
-      const angle = (Math.random() - 0.5) * 30 * (Math.PI / 180);
-      // Simple rotation using affine transformation would be ideal here
-      // but tfjs doesn't have built-in image rotation, so we'll skip this
+    // Random brightness adjustment (more aggressive)
+    if (Math.random() > 0.3) {
+      const brightness = 0.7 + Math.random() * 0.6; // 0.7 to 1.3
+      const brightened = tf.mul(augmented, brightness);
+      const clipped = tf.clipByValue(brightened, 0, 1);
+      augmented.dispose();
+      brightened.dispose();
+      augmented = clipped;
     }
 
-    // Random brightness adjustment
-    if (Math.random() > 0.5) {
-      const brightness = 1 + (Math.random() - 0.5) * 0.2;
-      augmented = tf.mul(augmented, tf.scalar(brightness));
-      augmented = tf.clipByValue(augmented, 0, 1);
-    }
-
-    // Random contrast adjustment
-    if (Math.random() > 0.5) {
-      const contrast = 1 + (Math.random() - 0.5) * 0.2;
+    // Random contrast adjustment (more aggressive)
+    if (Math.random() > 0.3) {
+      const contrast = 0.7 + Math.random() * 0.6; // 0.7 to 1.3
       const mean = tf.mean(augmented);
-      augmented = tf.add(
-        tf.mul(tf.sub(augmented, mean), tf.scalar(contrast)),
-        mean,
-      );
-      augmented = tf.clipByValue(augmented, 0, 1);
+      const centered = tf.sub(augmented, mean);
+      const contrasted = tf.mul(centered, contrast);
+      const final = tf.add(contrasted, mean);
+      const clipped = tf.clipByValue(final, 0, 1);
+
+      augmented.dispose();
+      mean.dispose();
+      centered.dispose();
+      contrasted.dispose();
+      final.dispose();
+      augmented = clipped;
     }
 
-    // Small amount of noise
-    if (Math.random() > 0.7) {
-      const noise = tf.randomNormal(augmented.shape, 0, 0.02);
-      augmented = tf.add(augmented, noise);
-      augmented = tf.clipByValue(augmented, 0, 1);
+    // Add noise
+    if (Math.random() > 0.5) {
+      const noise = tf.randomNormal(augmented.shape, 0, 0.05);
+      const noisy = tf.add(augmented, noise);
+      const clipped = tf.clipByValue(noisy, 0, 1);
+
+      augmented.dispose();
+      noise.dispose();
+      noisy.dispose();
+      augmented = clipped;
+    }
+
+    // Random small translation/shift (simplified to avoid complex operations)
+    if (Math.random() > 0.8) {
+      // Reduced frequency to avoid complexity
+      const [height, width, channels] = augmented.shape;
+      if (height > 4 && width > 4) {
+        // Only if image is large enough
+        const cropSize = Math.min(height - 2, width - 2);
+        const startY = Math.floor(Math.random() * (height - cropSize));
+        const startX = Math.floor(Math.random() * (width - cropSize));
+
+        const cropped = tf.slice(
+          augmented,
+          [startY, startX, 0],
+          [cropSize, cropSize, channels],
+        );
+        const resized = tf.image.resizeBilinear(cropped, [height, width]);
+
+        augmented.dispose();
+        cropped.dispose();
+        augmented = resized;
+      }
     }
 
     return augmented;
@@ -159,78 +163,146 @@ function augmentImageTensor(tensor) {
 }
 
 /**
- * Generate triplets for training
+ * Create similarity groups based on icon categories or features
+ * This is a simplified version - in practice you'd want better grouping
  * @param {Array} features - Array of feature arrays
+ * @param {Array} metadata - Array of metadata for each icon
+ * @returns {Map} Map of group ID to array of indices
+ */
+function createSimilarityGroups(features, metadata) {
+  const groups = new Map();
+
+  // For now, create simple groups based on basic image properties
+  // In practice, you'd want to use semantic categories or manual labeling
+  for (let i = 0; i < features.length; i++) {
+    const feature = features[i];
+
+    // Simple grouping based on average brightness and variance
+    const avgBrightness =
+      feature.reduce((sum, val) => sum + val, 0) / feature.length;
+    const variance =
+      feature.reduce((sum, val) => sum + Math.pow(val - avgBrightness, 2), 0) /
+      feature.length;
+
+    // Create group key based on quantized brightness and variance
+    const brightnessGroup = Math.floor(avgBrightness * 4); // 0-3
+    const varianceGroup = Math.floor(variance * 10); // 0-9
+    const groupKey = `${brightnessGroup}_${varianceGroup}`;
+
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, []);
+    }
+    groups.get(groupKey).push(i);
+  }
+
+  // Filter out groups with only one item
+  const filteredGroups = new Map();
+  for (const [key, indices] of groups) {
+    if (indices.length > 1) {
+      filteredGroups.set(key, indices);
+    }
+  }
+
+  return filteredGroups;
+}
+
+/**
+ * Generate better triplets for training
+ * @param {Array} features - Array of feature arrays
+ * @param {Array} metadata - Array of metadata for each icon
  * @param {number} numTriplets - Number of triplets to generate
  * @returns {{x: tf.Tensor4D, y: tf.Tensor2D}} Training data
  */
-function generateTriplets(features, numTriplets) {
-  const inputShape = getInputShape();
+function generateTriplets(features, metadata, numTriplets) {
+  return tf.tidy(() => {
+    const inputShape = getInputShape();
+    const similarityGroups = createSimilarityGroups(features, metadata);
+    const groupKeys = Array.from(similarityGroups.keys());
 
-  console.log(`Generating ${numTriplets} triplets...`);
+    console.log(`Generated ${similarityGroups.size} similarity groups`);
+    console.log(`Generating ${numTriplets} triplets...`);
 
-  // Create tensors for all triplets at once
-  const anchorIndices = [];
-  const positiveIndices = [];
-  const negativeIndices = [];
+    // Pre-allocate arrays for better performance
+    const anchorData = [];
+    const positiveData = [];
+    const negativeData = [];
 
-  for (let i = 0; i < numTriplets; i++) {
-    // Random anchor
-    const anchorIdx = Math.floor(Math.random() * features.length);
-    anchorIndices.push(anchorIdx);
+    for (let i = 0; i < numTriplets; i++) {
+      let anchorIdx, positiveIdx, negativeIdx;
 
-    // For positive, we'll use the same image with augmentation
-    positiveIndices.push(anchorIdx);
+      // 70% of the time, use similarity groups for positive pairs
+      if (Math.random() < 0.7 && groupKeys.length > 0) {
+        // Pick a random group
+        const groupKey =
+          groupKeys[Math.floor(Math.random() * groupKeys.length)];
+        const groupIndices = similarityGroups.get(groupKey);
 
-    // Random negative (different from anchor)
-    let negativeIdx = Math.floor(Math.random() * features.length);
-    while (negativeIdx === anchorIdx) {
+        if (groupIndices.length >= 2) {
+          // Pick anchor and positive from the same group
+          anchorIdx =
+            groupIndices[Math.floor(Math.random() * groupIndices.length)];
+          do {
+            positiveIdx =
+              groupIndices[Math.floor(Math.random() * groupIndices.length)];
+          } while (positiveIdx === anchorIdx);
+        } else {
+          // Fallback to random selection
+          anchorIdx = Math.floor(Math.random() * features.length);
+          positiveIdx = Math.floor(Math.random() * features.length);
+          while (positiveIdx === anchorIdx) {
+            positiveIdx = Math.floor(Math.random() * features.length);
+          }
+        }
+      } else {
+        // 30% of the time, use random positive pairs (harder training)
+        anchorIdx = Math.floor(Math.random() * features.length);
+        positiveIdx = Math.floor(Math.random() * features.length);
+        while (positiveIdx === anchorIdx) {
+          positiveIdx = Math.floor(Math.random() * features.length);
+        }
+      }
+
+      // Always pick a random negative
       negativeIdx = Math.floor(Math.random() * features.length);
+      while (negativeIdx === anchorIdx || negativeIdx === positiveIdx) {
+        negativeIdx = Math.floor(Math.random() * features.length);
+      }
+
+      // Store the data (not tensors yet)
+      anchorData.push(features[anchorIdx]);
+      positiveData.push(features[positiveIdx]);
+      negativeData.push(features[negativeIdx]);
     }
-    negativeIndices.push(negativeIdx);
-  }
 
-  // Create tensors
-  const anchors = [];
-  const positives = [];
-  const negatives = [];
+    // Now create all tensors at once and apply augmentation
+    const anchorTensors = anchorData.map((data) => {
+      const tensor = tf.tensor3d(data, inputShape);
+      return augmentImageTensor(tensor);
+    });
 
-  for (let i = 0; i < numTriplets; i++) {
-    // Get anchor tensor
-    const anchorData = features[anchorIndices[i]];
-    const anchorTensor = tf.tensor3d(anchorData, inputShape);
-    anchors.push(anchorTensor);
+    const positiveTensors = positiveData.map((data) => {
+      const tensor = tf.tensor3d(data, inputShape);
+      return augmentImageTensor(tensor);
+    });
 
-    // Create positive by augmenting anchor
-    const positiveTensor = augmentImageTensor(anchorTensor);
-    positives.push(positiveTensor);
+    const negativeTensors = negativeData.map((data) => {
+      const tensor = tf.tensor3d(data, inputShape);
+      return augmentImageTensor(tensor);
+    });
 
-    // Get negative tensor
-    const negativeData = features[negativeIndices[i]];
-    const negativeTensor = tf.tensor3d(negativeData, inputShape);
-    negatives.push(negativeTensor);
-  }
+    // Stack all tensors
+    const anchorStack = tf.stack(anchorTensors);
+    const positiveStack = tf.stack(positiveTensors);
+    const negativeStack = tf.stack(negativeTensors);
 
-  // Stack all tensors
-  const anchorStack = tf.stack(anchors);
-  const positiveStack = tf.stack(positives);
-  const negativeStack = tf.stack(negatives);
+    // Concatenate into single tensor [anchors, positives, negatives]
+    const x = tf.concat([anchorStack, positiveStack, negativeStack], 0);
 
-  // Concatenate into single tensor [anchors, positives, negatives]
-  const x = tf.concat([anchorStack, positiveStack, negativeStack], 0);
+    // Create dummy labels (not used but required by Keras)
+    const y = tf.zeros([numTriplets * 3, config.embeddingDim]);
 
-  // Create dummy labels (not used but required by Keras)
-  const y = tf.zeros([numTriplets * 3, config.embeddingDim]);
-
-  // Clean up individual tensors
-  anchors.forEach((t) => t.dispose());
-  positives.forEach((t) => t.dispose());
-  negatives.forEach((t) => t.dispose());
-  anchorStack.dispose();
-  positiveStack.dispose();
-  negativeStack.dispose();
-
-  return { x, y };
+    return { x, y };
+  });
 }
 
 /**
@@ -248,52 +320,24 @@ class TripletLossCallback extends tf.Callback {
   }
 
   async onEpochEnd(epoch, logs) {
-    let loss = logs.loss;
-    let valLoss = logs.val_loss;
-    // Handle different types of loss values
-    if (loss && loss.dataSync) {
-      // It's a tensor
-      const data = loss.dataSync();
-      loss = data[0];
-    } else if (loss && loss.data) {
-      // It's a promise or has data method
-      const data = await loss.data();
-      loss = Array.isArray(data) ? data[0] : data;
-    } else if (Array.isArray(loss)) {
-      loss = loss[0];
-    }
-
-    if (valLoss !== undefined && valLoss !== null) {
-      if (valLoss && valLoss.dataSync) {
-        const data = valLoss.dataSync();
-        valLoss = data[0];
-      } else if (valLoss && valLoss.data) {
-        const data = await valLoss.data();
-        valLoss = Array.isArray(data) ? data[0] : data;
-      } else if (Array.isArray(valLoss)) {
-        valLoss = valLoss[0];
-      }
-    }
-
-    // Ensure we have numbers
-    loss = Number(loss);
-    if (valLoss !== undefined && valLoss !== null) {
-      valLoss = Number(valLoss);
-    }
+    const loss =
+      typeof logs.loss === "number" ? logs.loss : logs.loss.dataSync()[0];
+    const valLoss =
+      typeof logs.val_loss === "number"
+        ? logs.val_loss
+        : logs.val_loss.dataSync()[0];
 
     this.losses.push(loss);
-    if (valLoss !== undefined && valLoss !== null) {
-      this.valLosses.push(valLoss);
-    }
+    this.valLosses.push(valLoss);
 
     // Check for NaN
-    if (isNaN(loss)) {
+    if (isNaN(loss) || isNaN(valLoss)) {
       console.error("NaN loss detected! Training may be unstable.");
     }
 
     // Log meaningful metrics
     console.log(
-      `Epoch ${epoch + 1} | ${this.currentEpoch}: loss=${loss.toFixed(4)}, val_loss=${valLoss.toFixed(4)}`,
+      `Epoch ${epoch + 1}: loss=${loss.toFixed(6)}, val_loss=${valLoss.toFixed(6)}`,
     );
   }
 }
@@ -315,9 +359,13 @@ export async function trainModel() {
   console.log("Creating model...");
   const model = createModel(inputShape, config.embeddingDim);
 
+  // Use a learning rate scheduler
+  const initialLearningRate = config.learningRate;
+  let currentLearningRate = initialLearningRate;
+
   // Compile model
   model.compile({
-    optimizer: tf.train.adam(config.learningRate),
+    optimizer: tf.train.adam(currentLearningRate),
     loss: createTripletLoss(config.margin),
   });
 
@@ -325,13 +373,17 @@ export async function trainModel() {
   model.summary();
 
   // Calculate number of triplets per epoch
-  const tripletsPerEpoch = Math.min(features.length * 2, 3000);
+  const tripletsPerEpoch = Math.min(features.length, 2000);
   const validationTriplets = Math.floor(tripletsPerEpoch * 0.2);
   const trainingTriplets = tripletsPerEpoch - validationTriplets;
 
   // Generate validation data once
   console.log("Generating validation data...");
-  const { x: xVal, y: yVal } = generateTriplets(features, validationTriplets);
+  const { x: xVal, y: yVal } = generateTriplets(
+    features,
+    metadata,
+    validationTriplets,
+  );
 
   // Ensure model directory exists
   const modelDir = path.dirname(config.modelDir);
@@ -349,9 +401,21 @@ export async function trainModel() {
 
   for (let epoch = 0; epoch < config.epochs; epoch++) {
     tripletCallback.setCurrentEpoch(epoch);
+
+    // Learning rate decay
+    if (epoch > 0 && epoch % 20 === 0) {
+      currentLearningRate *= 0.8;
+      console.log(`Reducing learning rate to ${currentLearningRate}`);
+      model.compile({
+        optimizer: tf.train.adam(currentLearningRate),
+        loss: createTripletLoss(config.margin),
+      });
+    }
+
     // Generate new training data each epoch
     const { x: xTrain, y: yTrain } = generateTriplets(
       features,
+      metadata,
       trainingTriplets,
     );
 
@@ -365,14 +429,14 @@ export async function trainModel() {
     });
 
     // Record history
-    history.loss.push(epochHistory.history.loss[0]);
-    history.val_loss.push(epochHistory.history.val_loss[0]);
+    const trainLoss = epochHistory.history.loss[0];
+    const valLoss = epochHistory.history.val_loss[0];
+    history.loss.push(trainLoss);
+    history.val_loss.push(valLoss);
 
-    // Check for early stopping manually
-    const currentValLoss = epochHistory.history.val_loss[0];
-
-    if (currentValLoss < bestValLoss - config.minDelta) {
-      bestValLoss = currentValLoss;
+    // Check for improvement
+    if (valLoss < bestValLoss - config.minDelta) {
+      bestValLoss = valLoss;
       epochsSinceImprovement = 0;
 
       // Save best weights
@@ -383,6 +447,9 @@ export async function trainModel() {
 
       // Save best model
       await model.save(`file://${config.modelDir}-best`);
+      console.log(
+        `  -> New best model saved (val_loss: ${valLoss.toFixed(6)})`,
+      );
     } else {
       epochsSinceImprovement++;
     }
@@ -392,7 +459,7 @@ export async function trainModel() {
     yTrain.dispose();
 
     // Check if training should stop
-    if (isNaN(currentValLoss) || isNaN(epochHistory.history.loss[0])) {
+    if (isNaN(valLoss) || isNaN(trainLoss)) {
       console.error("NaN detected, stopping training.");
       break;
     }
@@ -400,7 +467,6 @@ export async function trainModel() {
     // Manual early stopping
     if (epochsSinceImprovement >= config.patience) {
       console.log(`Early stopping triggered at epoch ${epoch + 1}`);
-      // Restore best weights
       if (bestWeights) {
         model.setWeights(bestWeights);
       }
@@ -408,17 +474,15 @@ export async function trainModel() {
     }
   }
 
-  // Clean up best weights if any
+  // Clean up
   if (bestWeights) {
     bestWeights.forEach((w) => w.dispose());
   }
-
-  // Clean up validation data
   xVal.dispose();
   yVal.dispose();
 
   // Save final model
-  console.log("Saving model...");
+  console.log("Saving final model...");
   await model.save(`file://${config.modelDir}`);
 
   // Save training metrics
@@ -453,7 +517,10 @@ export async function trainModel() {
   console.log("Training completed!");
   console.log(`Best epoch: ${metrics.bestEpoch + 1}`);
   console.log(
-    `Final validation loss: ${metrics.valLoss[metrics.valLoss.length - 1]}`,
+    `Best validation loss: ${Math.min(...metrics.valLoss).toFixed(6)}`,
+  );
+  console.log(
+    `Final validation loss: ${metrics.valLoss[metrics.valLoss.length - 1].toFixed(6)}`,
   );
 
   // Cleanup
