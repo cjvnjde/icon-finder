@@ -1,3 +1,4 @@
+// file: src/train.js
 import tf from "@tensorflow/tfjs-node";
 import fs from "node:fs";
 import path from "node:path";
@@ -10,30 +11,15 @@ const config = {
     modelDir: "./models/icon-similarity",
     epochs: 100,
     batchSize: 24,
-    learningRate: 0.001, // Increased learning rate
+    learningRate: 0.001,
     validationSplit: 0.2,
     embeddingDim: 128,
-    patience: 15, // Increased patience
+    patience: 15,
     minDelta: 0.001,
-    margin: 0.5, // Increased margin
+    margin: 0.5,
+    learningRateDecay: 0.8,
+    learningRateDecaySteps: 20,
 };
-
-export function createLearningRateScheduler(initialLr, decayFactor = 0.8, decaySteps = 20) {
-    let currentLr = initialLr;
-    let step = 0;
-
-    return {
-        getCurrentLr: () => currentLr,
-        step: () => {
-            step++;
-            if (step % decaySteps === 0) {
-                currentLr *= decayFactor;
-                console.log(`Reducing learning rate to ${currentLr}`);
-            }
-            return currentLr;
-        }
-    };
-}
 
 /**
  * Custom callback to monitor training progress
@@ -73,6 +59,26 @@ class TripletLossCallback extends tf.Callback {
 }
 
 /**
+ * Learning rate scheduler helper
+ */
+function createLearningRateScheduler(initialLr, decayRate, decaySteps) {
+    let currentLr = initialLr;
+    let step = 0;
+
+    return {
+        getCurrentLr: () => currentLr,
+        shouldDecay: (epoch) => {
+            return epoch > 0 && epoch % decaySteps === 0;
+        },
+        decay: () => {
+            currentLr *= decayRate;
+            console.log(`Reducing learning rate to ${currentLr}`);
+            return currentLr;
+        }
+    };
+}
+
+/**
  * Train the model
  */
 export async function trainModel() {
@@ -82,6 +88,11 @@ export async function trainModel() {
     console.log(`Training on ${metadata.totalIcons} icons`);
     console.log(`Feature dimensions: ${metadata.featureLength}`);
 
+    // Validate data
+    if (!features || features.length === 0) {
+        throw new Error("No features found in processed data");
+    }
+
     const inputShape = getInputShape();
     console.log(`Input shape: ${inputShape}`);
 
@@ -89,15 +100,19 @@ export async function trainModel() {
     console.log("Creating model...");
     const model = createModel(inputShape, config.embeddingDim);
 
-    // Use a learning rate scheduler
-    let currentLearningRate = config.learningRate;
+    // Create initial optimizer
+    let currentOptimizer = tf.train.adam(config.learningRate);
 
-    const lrScheduler = createLearningRateScheduler(config.learningRate);
-    const optimizer = tf.train.adam(config.learningRate);
+    // Create learning rate scheduler
+    const lrScheduler = createLearningRateScheduler(
+        config.learningRate,
+        config.learningRateDecay,
+        config.learningRateDecaySteps
+    );
 
     // Compile model
     model.compile({
-        optimizer: optimizer,
+        optimizer: currentOptimizer,
         loss: createTripletLoss(config.margin),
     });
 
@@ -109,11 +124,13 @@ export async function trainModel() {
     const validationTriplets = Math.floor(tripletsPerEpoch * 0.2);
     const trainingTriplets = tripletsPerEpoch - validationTriplets;
 
+    console.log(`Triplets per epoch: ${tripletsPerEpoch} (${trainingTriplets} training, ${validationTriplets} validation)`);
+
     // Generate validation data once
     console.log("Generating validation data...");
     const {anchors: anchorsVal, positives: positivesVal, negatives: negativesVal} = generateTriplets(
         features,
-        validationTriplets,
+        validationTriplets
     );
 
     // Concatenate validation triplets for model input
@@ -138,15 +155,26 @@ export async function trainModel() {
         tripletCallback.setCurrentEpoch(epoch);
 
         // Learning rate decay
-        if (epoch > 0 && epoch % 20 === 0) {
-            const newLr = lrScheduler.step();
-            optimizer.setLearningRate(newLr);
+        if (lrScheduler.shouldDecay(epoch)) {
+            const newLr = lrScheduler.decay();
+
+            // Dispose old optimizer to prevent memory leaks
+            currentOptimizer.dispose();
+
+            // Create new optimizer with updated learning rate
+            currentOptimizer = tf.train.adam(newLr);
+
+            // Recompile with new optimizer
+            model.compile({
+                optimizer: currentOptimizer,
+                loss: createTripletLoss(config.margin),
+            });
         }
 
         // Generate new training data each epoch
         const {anchors: anchorsTrain, positives: positivesTrain, negatives: negativesTrain} = generateTriplets(
             features,
-            trainingTriplets,
+            trainingTriplets
         );
 
         // Concatenate training triplets for model input
@@ -209,6 +237,11 @@ export async function trainModel() {
             }
             break;
         }
+
+        // Log progress every 10 epochs
+        if ((epoch + 1) % 10 === 0) {
+            console.log(`Progress: ${epoch + 1}/${config.epochs} epochs completed`);
+        }
     }
 
     // Clean up
@@ -265,4 +298,5 @@ export async function trainModel() {
 
     // Cleanup
     model.dispose();
+    currentOptimizer.dispose();
 }

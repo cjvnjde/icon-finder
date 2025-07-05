@@ -33,7 +33,7 @@ async function preprocessIcon(filename, index) {
     try {
         const svgContent = fs.readFileSync(svgPath, "utf8");
 
-        // Convert SVG to PNG with transparent background first
+        // 1. Convert SVG to PNG with a transparent background (restoring the original robust method)
         const pngBuffer = await sharp(Buffer.from(svgContent))
             .resize(config.iconSize, config.iconSize, {
                 fit: "contain",
@@ -42,61 +42,50 @@ async function preprocessIcon(filename, index) {
             .png()
             .toBuffer();
 
-        // Save the processed PNG file if enabled
+        // Save the processed PNG file if enabled (useful for debugging)
         if (config.savePngFiles) {
             const pngFileName = `${iconName}.png`;
             const pngPath = path.join(config.iconsPngDir, pngFileName);
             fs.writeFileSync(pngPath, pngBuffer);
         }
 
-        // Process the PNG to get RGBA data first, then handle transparency
+        // 2. Process the PNG to get raw RGBA data
         const {data, info} = await sharp(pngBuffer)
             .raw()
             .toBuffer({resolveWithObject: true});
 
         const pixelArray = new Uint8Array(data);
         const expectedLength = config.iconSize ** 2;
-        const channels = info.channels; // Should be 4 for RGBA
+        const channels = info.channels; // Should be 4 (RGBA)
 
-        if (pixelArray.length !== expectedLength * channels) {
-            console.warn(
-                `Warning: ${filename} has unexpected data length: ${pixelArray.length}, expected ${expectedLength * channels}`,
-            );
-        }
+        const processedArray = new Float32Array(expectedLength);
 
-        // Convert RGBA to grayscale and handle transparency
-        const grayscaleArray = new Float32Array(expectedLength);
+        // 3. Blend with a white background, then binarize and invert
+        const threshold = 230; // Binarization threshold; pixels darker than this become the icon.
 
         for (let i = 0; i < expectedLength; i++) {
             const pixelStart = i * channels;
             const r = pixelArray[pixelStart];
             const g = pixelArray[pixelStart + 1];
             const b = pixelArray[pixelStart + 2];
+            // Handle images that might not have an alpha channel
             const a = channels > 3 ? pixelArray[pixelStart + 3] : 255;
 
-            // Convert to grayscale using luminance formula
+            // Convert to grayscale using the standard luminance formula
             const gray = 0.299 * r + 0.587 * g + 0.114 * b;
 
-            // Handle transparency: if pixel is transparent, treat as white background
-            // If pixel has alpha, blend with white background
+            // Blend the grayscale pixel with a white background (255) using its alpha value
             const alpha = a / 255.0;
             const blendedGray = gray * alpha + 255 * (1 - alpha);
 
-            // Normalize and invert (so icon parts are higher values, background is lower)
-            grayscaleArray[i] = (255 - blendedGray) / 255.0;
+            // 4. Binarize and Invert the final pixel value
+            // If the blended pixel is dark (part of the icon), set to 1.0.
+            // If it's light (part of the background), set to 0.0.
+            processedArray[i] = blendedGray < threshold ? 1.0 : 0.0;
         }
 
-        // Convert Float32Array to regular Array for JSON serialization
-        const normalizedArray = Array.from(grayscaleArray);
-
-        // Add debugging info for the first few icons
-        if (index < 5) {
-            const minVal = Math.min(...normalizedArray);
-            const maxVal = Math.max(...normalizedArray);
-            const nonZeroCount = normalizedArray.filter(val => val > 0.01).length; // Use threshold for "meaningful" pixels
-            const meanVal = normalizedArray.reduce((sum, val) => sum + val, 0) / normalizedArray.length;
-            console.log(`Icon ${filename}: min=${minVal.toFixed(3)}, max=${maxVal.toFixed(3)}, mean=${meanVal.toFixed(3)}, significant pixels=${nonZeroCount}`);
-        }
+        // Convert Float32Array to a regular Array for JSON serialization
+        const normalizedArray = Array.from(processedArray);
 
         const iconData = {
             name: iconName,
@@ -186,8 +175,8 @@ export async function preprocessAllIcons() {
     console.log(`Feature statistics:`);
     console.log(`- Min value: ${minFeature.toFixed(3)}`);
     console.log(`- Max value: ${maxFeature.toFixed(3)}`);
-    console.log(`- Non-zero features: ${nonZeroFeatures}/${totalFeatures} (${(nonZeroFeatures/totalFeatures*100).toFixed(1)}%)`);
-    console.log(`- Significant features (>0.01): ${significantFeatures}/${totalFeatures} (${(significantFeatures/totalFeatures*100).toFixed(1)}%)`);
+    console.log(`- Non-zero features: ${nonZeroFeatures}/${totalFeatures} (${(nonZeroFeatures / totalFeatures * 100).toFixed(1)}%)`);
+    console.log(`- Significant features (>0.01): ${significantFeatures}/${totalFeatures} (${(significantFeatures / totalFeatures * 100).toFixed(1)}%)`);
 
     const metadata = {
         totalIcons: iconData.length,
