@@ -3,142 +3,230 @@ import path from "node:path";
 import sharp from "sharp";
 
 const config = {
-  iconSize: 64,
-  iconsDir: "./icons",
-  iconDataFile: "./icon-data.json",
-  featuresFile: "./features.json",
-  version: "1.0.0",
+    iconSize: 64,
+    iconsDir: "./icons",
+    iconsPngDir: "./icons-png",
+    iconDataFile: "./icon-data.json",
+    featuresFile: "./features.json",
+    version: "1.0.0",
+    savePngFiles: true,
 };
 
 function clearFiles() {
-  console.log("Clearing files...");
-  fs.rmSync(config.iconDataFile, { force: true });
-  fs.rmSync(config.featuresFile, { force: true });
+    console.log("Clearing files...");
+    fs.rmSync(config.iconDataFile, {force: true});
+    fs.rmSync(config.featuresFile, {force: true});
+    fs.rmSync(config.iconsPngDir, {force: true, recursive: true});
+}
+
+function ensurePngDirectory() {
+    if (config.savePngFiles && !fs.existsSync(config.iconsPngDir)) {
+        fs.mkdirSync(config.iconsPngDir, {recursive: true});
+        console.log(`Created PNG directory: ${config.iconsPngDir}`);
+    }
 }
 
 async function preprocessIcon(filename, index) {
-  const iconName = path.basename(filename, ".svg");
-  const svgPath = path.join(config.iconsDir, filename);
+    const iconName = path.basename(filename, ".svg");
+    const svgPath = path.join(config.iconsDir, filename);
 
-  try {
-    const svgContent = fs.readFileSync(svgPath, "utf8");
+    try {
+        const svgContent = fs.readFileSync(svgPath, "utf8");
 
-    const pngBuffer = await sharp(Buffer.from(svgContent))
-      .resize(config.iconSize, config.iconSize, {
-        fit: "contain",
-        background: { r: 255, g: 255, b: 255, alpha: 0 },
-      })
-      .greyscale()
-      .raw()
-      .toBuffer();
+        // Convert SVG to PNG with transparent background first
+        const pngBuffer = await sharp(Buffer.from(svgContent))
+            .resize(config.iconSize, config.iconSize, {
+                fit: "contain",
+                background: {r: 255, g: 255, b: 255, alpha: 0}, // Transparent background
+            })
+            .png()
+            .toBuffer();
 
-    const pixelArray = new Uint8Array(pngBuffer);
-    const expectedLength = config.iconSize ** 2;
+        // Save the processed PNG file if enabled
+        if (config.savePngFiles) {
+            const pngFileName = `${iconName}.png`;
+            const pngPath = path.join(config.iconsPngDir, pngFileName);
+            fs.writeFileSync(pngPath, pngBuffer);
+        }
 
-    if (pixelArray.length !== expectedLength) {
-      console.warn(
-        `Warning: ${filename} has ${pixelArray.length} pixels, expected ${expectedLength}`,
-      );
-      return null;
+        // Process the PNG to get RGBA data first, then handle transparency
+        const {data, info} = await sharp(pngBuffer)
+            .raw()
+            .toBuffer({resolveWithObject: true});
+
+        const pixelArray = new Uint8Array(data);
+        const expectedLength = config.iconSize ** 2;
+        const channels = info.channels; // Should be 4 for RGBA
+
+        if (pixelArray.length !== expectedLength * channels) {
+            console.warn(
+                `Warning: ${filename} has unexpected data length: ${pixelArray.length}, expected ${expectedLength * channels}`,
+            );
+        }
+
+        // Convert RGBA to grayscale and handle transparency
+        const grayscaleArray = new Float32Array(expectedLength);
+
+        for (let i = 0; i < expectedLength; i++) {
+            const pixelStart = i * channels;
+            const r = pixelArray[pixelStart];
+            const g = pixelArray[pixelStart + 1];
+            const b = pixelArray[pixelStart + 2];
+            const a = channels > 3 ? pixelArray[pixelStart + 3] : 255;
+
+            // Convert to grayscale using luminance formula
+            const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+
+            // Handle transparency: if pixel is transparent, treat as white background
+            // If pixel has alpha, blend with white background
+            const alpha = a / 255.0;
+            const blendedGray = gray * alpha + 255 * (1 - alpha);
+
+            // Normalize and invert (so icon parts are higher values, background is lower)
+            grayscaleArray[i] = (255 - blendedGray) / 255.0;
+        }
+
+        // Convert Float32Array to regular Array for JSON serialization
+        const normalizedArray = Array.from(grayscaleArray);
+
+        // Add debugging info for the first few icons
+        if (index < 5) {
+            const minVal = Math.min(...normalizedArray);
+            const maxVal = Math.max(...normalizedArray);
+            const nonZeroCount = normalizedArray.filter(val => val > 0.01).length; // Use threshold for "meaningful" pixels
+            const meanVal = normalizedArray.reduce((sum, val) => sum + val, 0) / normalizedArray.length;
+            console.log(`Icon ${filename}: min=${minVal.toFixed(3)}, max=${maxVal.toFixed(3)}, mean=${meanVal.toFixed(3)}, significant pixels=${nonZeroCount}`);
+        }
+
+        const iconData = {
+            name: iconName,
+            path: filename,
+            pngPath: config.savePngFiles ? `${iconName}.png` : null,
+            index,
+        };
+
+        return {iconData, features: normalizedArray};
+    } catch (error) {
+        console.error(`Error processing ${filename}:`, error);
+        return null;
     }
-
-    const normalizedArray = Array.from(pixelArray).map((val) => val / 255.0);
-
-    const iconData = {
-      name: iconName,
-      path: filename,
-      index,
-    };
-
-    return { iconData, features: normalizedArray };
-  } catch (error) {
-    console.error(`Error processing ${filename}:`, error);
-    return null;
-  }
 }
 
-async function preprocessAllIcons() {
-  console.log("Starting icon preprocessing...");
+export async function preprocessAllIcons() {
+    console.log("Starting icon preprocessing...");
 
-  clearFiles();
+    clearFiles();
+    ensurePngDirectory();
 
-  const svgFiles = fs
-    .readdirSync(config.iconsDir)
-    .filter((file) => file.endsWith(".svg"));
+    const svgFiles = fs
+        .readdirSync(config.iconsDir)
+        .filter((file) => file.endsWith(".svg"));
 
-  console.log(`Found ${svgFiles.length} SVG files`);
+    console.log(`Found ${svgFiles.length} SVG files`);
 
-  const iconData = [];
-  const features = [];
-  let successCount = 0;
-  let errorCount = 0;
+    const iconData = [];
+    const features = [];
+    let successCount = 0;
+    let errorCount = 0;
 
-  const batchSize = 100;
-  for (let i = 0; i < svgFiles.length; i += batchSize) {
-    const batch = svgFiles.slice(i, i + batchSize);
-    const batchPromises = batch.map((filename, batchIndex) =>
-      preprocessIcon(filename, successCount + batchIndex),
-    );
+    const batchSize = 100;
+    for (let i = 0; i < svgFiles.length; i += batchSize) {
+        const batch = svgFiles.slice(i, i + batchSize);
+        const batchPromises = batch.map((filename, batchIndex) =>
+            preprocessIcon(filename, successCount + batchIndex),
+        );
 
-    const batchResults = await Promise.allSettled(batchPromises);
+        const batchResults = await Promise.allSettled(batchPromises);
 
-    for (const result of batchResults) {
-      if (result.status === "fulfilled" && result.value) {
-        features.push(result.value.features);
-        iconData.push(result.value.iconData);
-        successCount++;
-      } else {
-        errorCount++;
-      }
+        for (const result of batchResults) {
+            if (result.status === "fulfilled" && result.value) {
+                features.push(result.value.features);
+                iconData.push(result.value.iconData);
+                successCount++;
+            } else {
+                errorCount++;
+                if (result.status === "rejected") {
+                    console.error("Batch processing error:", result.reason);
+                }
+            }
+        }
+
+        console.log(
+            `Processed ${Math.min(i + batchSize, svgFiles.length)}/${svgFiles.length} icons (${successCount} successful, ${errorCount} errors)`,
+        );
     }
 
-    console.log(
-      `Processed ${Math.min(i + batchSize, svgFiles.length)}/${svgFiles.length} icons (${successCount} successful, ${errorCount} errors)`,
-    );
-  }
+    console.log(`\nProcessing complete:`);
+    console.log(`- Successfully processed: ${successCount} icons`);
+    console.log(`- Errors: ${errorCount} icons`);
+    if (config.savePngFiles) {
+        console.log(`- PNG files saved to: ${config.iconsPngDir}`);
+    }
 
-  console.log(`\nProcessing complete:`);
-  console.log(`- Successfully processed: ${successCount} icons`);
-  console.log(`- Errors: ${errorCount} icons`);
+    if (features.length !== iconData.length) {
+        throw new Error("Mismatch between features and icon data lengths");
+    }
 
-  if (features.length !== iconData.length) {
-    throw new Error("Mismatch between features and icon data lengths");
-  }
+    let minFeature = 1;
+    let maxFeature = 0;
+    let nonZeroFeatures = 0;
+    let totalFeatures = 0;
+    let significantFeatures = 0; // Features > 0.01
 
-  const metadata = {
-    totalIcons: iconData.length,
-    iconSize: config.iconSize,
-    featureLength: config.iconSize ** 2,
-    channels: 1,
-    icons: iconData,
-    processedAt: new Date().toISOString(),
-    version: config.version,
-  };
+    for (const iconFeatures of features) {
+        for (const value of iconFeatures) {
+            if (value < minFeature) minFeature = value;
+            if (value > maxFeature) maxFeature = value;
+            if (value > 0) nonZeroFeatures++;
+            if (value > 0.01) significantFeatures++;
+            totalFeatures++;
+        }
+    }
 
-  fs.writeFileSync(config.iconDataFile, JSON.stringify(metadata, null, 2));
-  console.log(`Saved metadata to ${config.iconDataFile}`);
+    console.log(`Feature statistics:`);
+    console.log(`- Min value: ${minFeature.toFixed(3)}`);
+    console.log(`- Max value: ${maxFeature.toFixed(3)}`);
+    console.log(`- Non-zero features: ${nonZeroFeatures}/${totalFeatures} (${(nonZeroFeatures/totalFeatures*100).toFixed(1)}%)`);
+    console.log(`- Significant features (>0.01): ${significantFeatures}/${totalFeatures} (${(significantFeatures/totalFeatures*100).toFixed(1)}%)`);
 
-  fs.writeFileSync(config.featuresFile, JSON.stringify(features));
-  console.log(`Saved features to ${config.featuresFile}`);
+    const metadata = {
+        totalIcons: iconData.length,
+        iconSize: config.iconSize,
+        featureLength: config.iconSize ** 2,
+        channels: 1,
+        icons: iconData,
+        processedAt: new Date().toISOString(),
+        version: config.version,
+        pngDirectoryPath: config.savePngFiles ? config.iconsPngDir : null,
+        statistics: {
+            minFeature,
+            maxFeature,
+            nonZeroFeatures,
+            significantFeatures,
+            totalFeatures
+        }
+    };
 
-  return { metadata, features };
+    fs.writeFileSync(config.iconDataFile, JSON.stringify(metadata, null, 2));
+    console.log(`Saved metadata to ${config.iconDataFile}`);
+
+    fs.writeFileSync(config.featuresFile, JSON.stringify(features));
+    console.log(`Saved features to ${config.featuresFile}`);
+
+    return {metadata, features};
 }
 
 export function loadProcessedData() {
-  const metadata = JSON.parse(fs.readFileSync(config.iconDataFile, "utf8"));
-  const features = JSON.parse(fs.readFileSync(config.featuresFile, "utf8"));
+    const metadata = JSON.parse(fs.readFileSync(config.iconDataFile, "utf8"));
+    const features = JSON.parse(fs.readFileSync(config.featuresFile, "utf8"));
 
-  return { metadata, features };
+    return {metadata, features};
 }
 
 export function getInputShape() {
-  return [config.iconSize, config.iconSize, 1];
+    return [config.iconSize, config.iconSize, 1];
 }
 
 export function getFlattenedInputShape() {
-  return [config.iconSize ** 2];
-}
-
-if (import.meta.main) {
-  preprocessAllIcons().catch(console.error);
+    return [config.iconSize ** 2];
 }

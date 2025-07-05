@@ -337,7 +337,7 @@ class TripletLossCallback extends tf.Callback {
 
     // Log meaningful metrics
     console.log(
-      `Epoch ${epoch + 1}: loss=${loss.toFixed(6)}, val_loss=${valLoss.toFixed(6)}`,
+      `Epoch ${this.currentEpoch + 1}: loss=${loss.toFixed(6)}, val_loss=${valLoss.toFixed(6)}`,
     );
   }
 }
@@ -525,43 +525,4 @@ export async function trainModel() {
 
   // Cleanup
   model.dispose();
-}
-
-/**
- * Load the trained model
- * @returns {Promise<tf.LayersModel>} The loaded model
- */
-export async function loadTrainedModel() {
-  const modelPath = `file://${config.modelDir}`;
-  return await tf.loadLayersModel(modelPath);
-}
-
-/**
- * Load model metadata
- * @returns {Object} Model metadata
- */
-export function loadModelMetadata() {
-  const modelDir = path.dirname(config.modelDir);
-  const metadataPath = path.join(modelDir, "model-metadata.json");
-
-  if (!fs.existsSync(metadataPath)) {
-    throw new Error(`Model metadata not found at ${metadataPath}`);
-  }
-
-  return JSON.parse(fs.readFileSync(metadataPath, "utf8"));
-}
-
-/**
- * Load training metrics
- * @returns {Object} Training metrics
- */
-export function loadTrainingMetrics() {
-  const modelDir = path.dirname(config.modelDir);
-  const metricsPath = path.join(modelDir, "training-metrics.json");
-
-  if (!fs.existsSync(metricsPath)) {
-    throw new Error(`Training metrics not found at ${metricsPath}`);
-  }
-
-  return JSON.parse(fs.readFileSync(metricsPath, "utf8"));
 }
